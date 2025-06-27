@@ -6,57 +6,78 @@ import torch.optim as optim
 
 """
 dataset/
-├── tongue/
+├── images/
 │   ├── img001.jpg
+│   ├── img002.jpg
 │   └── ...
-├── face/
-│   ├── img101.jpg
-│   └── ...
-└── other/
-    ├── img201.jpg
-    └── ...
+└── labels.csv
+
+filename,face,tongue
+img001.jpg,1,0
+img002.jpg,1,1
+img003.jpg,0,1
+img004.jpg,0,0
 
 """
+# 自定义Dataset
+class MultiLabelDataset(Dataset):
+    def __init__(self, csv_file, img_dir, transform=None):
+        self.data = pd.read_csv(csv_file)
+        self.img_dir = img_dir
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, idx):
+        row = self.data.iloc[idx]
+        img_path = os.path.join(self.img_dir, row['filename'])
+        image = Image.open(img_path).convert('RGB')
+        if self.transform:
+            image = self.transform(image)
+        labels = torch.tensor([row['face'], row['tongue']], dtype=torch.float32)
+        return image, labels
+
 transform = transforms.Compose([
     transforms.Resize((224, 224)),
-    transforms.ToTensor(),
-    transforms.Normalize([0.485, 0.456, 0.406],  # ImageNet mean
-                         [0.229, 0.224, 0.225])  # ImageNet std
+    transforms.ToTensor()
 ])
+# 数据加载
+dataset = MultiLabelDataset('dataset/labels.csv', 'dataset/images', transform)
+dataloader = DataLoader(dataset, batch_size=32, shuffle=True)
 
-train_data = datasets.ImageFolder("dataset/", transform=transform)
-train_loader = DataLoader(train_data, batch_size=32, shuffle=True)
-
-
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
+# 加载 ResNet50
 model = models.resnet50(pretrained=True)
-# 替换最后一层为三分类
-model.fc = nn.Linear(model.fc.in_features, 3)
-model = model.to(device)
+model.fc = nn.Sequential(
+    nn.Linear(model.fc.in_features, 2),
+    nn.Sigmoid()  # 输出 [0-1] 概率
+)
 
-# 训练配置
+# 训练设置
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+model.to(device)
 
-criterion = nn.CrossEntropyLoss()
-optimizer = optim.Adam(model.parameters(), lr=1e-4)
+criterion = nn.BCELoss()
+optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
 
-# 训练
-for epoch in range(10):  # 可自行调整轮数
+# 训练循环
+for epoch in range(10):
     model.train()
-    running_loss = 0.0
+    total_loss = 0
+    for images, labels in dataloader:
+        images = images.to(device)
+        labels = labels.to(device)
 
-    for images, labels in train_loader:
-        images, labels = images.to(device), labels.to(device)
+        outputs = model(images)           # 输出 shape [B, 2]
+        loss = criterion(outputs, labels) # 多标签用 BCE Loss
 
         optimizer.zero_grad()
-        outputs = model(images)
-        loss = criterion(outputs, labels)
         loss.backward()
         optimizer.step()
 
-        running_loss += loss.item()
+        total_loss += loss.item()
 
-    print(f"Epoch {epoch+1}, Loss: {running_loss / len(train_loader)}")
+    print(f"Epoch {epoch+1}, Loss: {total_loss/len(dataloader):.4f}")
 
 # 保存模型
 torch.save(model.state_dict(), "tongue_face_other_model.pth")
